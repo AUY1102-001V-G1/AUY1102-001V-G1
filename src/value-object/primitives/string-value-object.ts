@@ -18,11 +18,11 @@ export abstract class StringValueObject {
   }
 
   hasMoreCharacterThan(length = 30): boolean {
-    return this.value.length > length ? true : false;
+    return this.value.length > length;
   }
 
   hasLessCharacterThan(length = 5): boolean {
-    return this.value.length < length ? true : false;
+    return this.value.length < length;
   }
 
   toString(): string {

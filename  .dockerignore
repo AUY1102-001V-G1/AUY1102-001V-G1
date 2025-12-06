@@ -1,0 +1,66 @@
+# Node modules (se reinstalan en el build)
+node_modules
+npm-debug.log*
+npm-shrinkwrap.json
+.npm
+
+# Build outputs (se generan de nuevo)
+dist
+build
+coverage
+.nyc_output
+*.tsbuildinfo
+
+# Development files
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Git
+.git
+.gitignore
+.gitattributes
+.github
+
+# IDEs
+.vscode
+.idea
+.DS_Store
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9
+
+# Testing (NO necesarios en imagen)
+test
+__tests__
+*.test.js
+*.spec.js
+*.test.ts
+*.spec.ts
+jest.config.js
+
+# Documentation
+docs
+img
+README.md
+CHANGELOG.md
+EVIDENCIAS.md
+.editorconfig
+
+# CI/CD
+.travis.yml
+.gitlab-ci.yml
+.circleci
+Jenkinsfile
+
+# Misc
+.cache
+.turbo
+Dockerfile
+.dockerignore
+docker-compose.yml
+LICENSE

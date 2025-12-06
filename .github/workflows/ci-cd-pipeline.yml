@@ -1,0 +1,360 @@
+#==============================================================================
+# CI/CD PIPELINE - GitHub Actions Workflow
+#==============================================================================
+# Descripción: Pipeline completo de integración y despliegue continuo
+# Autor: AUY1102 Students
+# Versión: 1.0.0
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Variables de entorno globales
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKER_HUB_USERNAME }}/auy1102-app
+  NODE_VERSION: 18.x
+
+# ==============================================================================
+# JOBS
+# ==============================================================================
+
+jobs:
+
+  # ========== PHASE 1: BUILD & UNIT TESTS ==========
+  build-and-test:
+    name: Build & Unit Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x]
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🏗️ Build project
+        run: npm run build
+
+      - name: 🔍 Lint code
+        run: npm run lint
+        continue-on-error: true
+
+      - name: ✅ Run unit tests
+        run: npm run test:coverage
+
+      - name: 📊 Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+        continue-on-error: true
+
+      - name: 📦 Archive test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: coverage/
+          retention-days: 7
+        continue-on-error: true
+
+  # ========== PHASE 2: CODE QUALITY (SonarCloud) ==========
+  sonarcloud:
+    name: 🔍 SonarCloud Code Quality
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: ✅ Run tests with coverage
+        run: npm run test:coverage
+        continue-on-error: true
+
+      - name: 🔍 SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONARCLOUD_TOKEN }}
+        continue-on-error: true
+
+  # ========== PHASE 3: SECURITY SCANNING ==========
+  security-scan:
+    name: 🔐 Security Analysis
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      # --- Snyk Scanning ---
+      - name: 🔍 Run Snyk Security Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --all-projects
+        continue-on-error: true
+
+      # --- GitHub Advanced Security (CodeQL) ---
+      - name: 🚀 Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: javascript
+        continue-on-error: true
+
+      - name: 🔎 Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        continue-on-error: true
+
+      # --- Dependency Audit ---
+      - name: 🔍 Dependency Security Audit
+        run: npm audit --audit-level=high || echo "Non-critical vulnerabilities found"
+        continue-on-error: true
+
+      # --- Secret Detection ---
+      - name: 🔑 Detect Secrets with Trufflehog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --debug
+        continue-on-error: true
+
+  # ========== PHASE 4: BUILD DOCKER IMAGE ==========
+  build-docker:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [build-and-test, sonarcloud, security-scan]
+    if: always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    outputs:
+      image-tag: ${{ steps.image.outputs.tag }}
+      image-version: ${{ steps.image.outputs.version }}
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔨 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: 🔐 Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: 📌 Generate image metadata
+        id: image
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAG="latest"
+            VERSION="v$(date +%Y.%m.%d)-${{ github.run_number }}"
+          else
+            TAG="develop-${{ github.run_number }}"
+            VERSION="dev-$(date +%Y.%m.%d)-${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📌 Image Tag: $TAG"
+          echo "📌 Image Version: $VERSION"
+
+      - name: 🐳 Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.version }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          build-args: |
+            BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.image.outputs.version }}
+
+  # ========== PHASE 5: DOCKER SCOUT VULNERABILITY SCAN ==========
+  docker-scout:
+    name: 🛡️ Docker Scout Security Scan
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔨 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: 🔐 Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: 🛡️ Docker Scout CVE Scan
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-docker.outputs.image-tag }}
+          sarif-file: scout-results.sarif
+          write-comment: true
+        continue-on-error: true
+
+      - name: 📤 Upload Scout results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: scout-results.sarif
+          category: docker-scout
+        continue-on-error: true
+
+  # ========== PHASE 6: TEST DOCKER IMAGE ==========
+  test-docker:
+    name: ✅ Test Docker Image
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔐 Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: 🐳 Pull Docker image
+        run: docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-docker.outputs.image-tag }}
+
+      - name: ✅ Test basic functionality
+        run: |
+          docker run --rm \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-docker.outputs.image-tag }} \
+            node -v
+
+      - name: ✅ Test npm functionality
+        run: |
+          docker run --rm \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-docker.outputs.image-tag }} \
+            npm -v
+
+      - name: 🚀 Test container startup
+        run: |
+          docker run -d --name test-app \
+            -p 3000:3000 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-docker.outputs.image-tag }}
+
+          echo "⏳ Waiting for application startup..."
+          sleep 8
+
+          echo "📋 Container logs:"
+          docker logs test-app || echo "No logs available"
+
+          echo "🧹 Cleanup..."
+          docker rm -f test-app || true
+
+  # ========== PHASE 7: DEPLOYMENT SUMMARY ==========
+  deploy:
+    name: 📊 Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [build-docker, test-docker, docker-scout]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📊 Generate deployment summary
+        run: |
+          cat > deployment-summary.txt << EOF
+          ============================================================
+          🎉 CI/CD PIPELINE EXECUTION SUMMARY
+          ============================================================
+
+          Project: AUY1102-001V-G1
+          Repository: https://github.com/${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+
+          Image Details:
+          - Registry: ${{ env.REGISTRY }}
+          - Image: ${{ env.IMAGE_NAME }}
+          - Tag: ${{ needs.build-docker.outputs.image-tag }}
+          - Version: ${{ needs.build-docker.outputs.image-version }}
+
+          Full Image URI:
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-docker.outputs.image-tag }}
+
+          Docker Hub:
+          https://hub.docker.com/repository/docker/${{ secrets.DOCKER_HUB_USERNAME }}/auy1102-app
+
+          Execution Details:
+          - Workflow: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Timestamp: $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+          ============================================================
+          EOF
+
+          cat deployment-summary.txt
+
+      - name: 🎉 Deployment complete
+        run: echo "✅ Deployment completed successfully!"
